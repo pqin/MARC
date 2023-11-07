@@ -14,8 +14,6 @@
             </MenuItem>
         </Menu>
         <StatusBar DockPanel.Dock="Bottom" Height="Auto">
-            <ProgressBar Name="ProgressBar" Width="100" Height="18" IsIndeterminate="False" Minimum="0" Maximum="1"/>
-            <Button Name="AbortButton" IsEnabled="False" Click="FileAbort_Click">Abort</Button>
             <Label Name="LabelRecordSelection"/>
         </StatusBar>
         <Grid>

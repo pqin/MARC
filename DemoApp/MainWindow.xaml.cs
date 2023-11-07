@@ -22,10 +22,18 @@ namespace DemoApp
         {
             public string Filename { get; set; }
             public CancellationToken CancellationToken { get; set; }
+
+            public FileReaderArgs()
+            {
+                Filename = String.Empty;
+                CancellationToken = CancellationToken.None;
+            }
         }
 
         private Thread? thread = null;
         private CancellationTokenSource cancelTokenSource;
+
+        private ProgressDialog progressDialog;
         private List<Record> records = new List<Record>();
 
         public MainWindow()
@@ -35,7 +43,11 @@ namespace DemoApp
 
         private void Window_Closing(object sender, CancelEventArgs e)
         {
-            cancelTokenSource?.Cancel();
+            try
+            {
+                cancelTokenSource?.Cancel();
+            }
+            catch { }
         }
 
         private void FileOpen_Click(object sender, RoutedEventArgs e)
@@ -49,46 +61,55 @@ namespace DemoApp
 
             OpenFileDialog ofd = new OpenFileDialog();
             bool? fileStatus = ofd.ShowDialog();
-            if (fileStatus == true)
-            {
-                FileReaderArgs args = new FileReaderArgs();
-                args.Filename = ofd.FileName;
-                cancelTokenSource = new CancellationTokenSource();
-                args.CancellationToken = cancelTokenSource.Token;
-
-                thread = new Thread(OpenFile);
-                thread.IsBackground = true;
-                thread.Start(args);
-
-                AbortButton.IsEnabled = true;
-            }
-        }
-
-        private void FileAbort_Click(object sender, RoutedEventArgs e)
-        {
-            cancelTokenSource?.Cancel();
-        }
-
-        private void OpenFile(object o)
-        {
-            if (!(o is FileReaderArgs arg))
+            if (fileStatus != true)
             {
                 return;
             }
-            string filename = arg.Filename;
-            CancellationToken token = arg.CancellationToken;
 
+            RecordSelector.Items.Clear();
+
+            FileReaderArgs args = new FileReaderArgs();
+            args.Filename = ofd.FileName;
+            cancelTokenSource = new CancellationTokenSource();
+            args.CancellationToken = cancelTokenSource.Token;
+
+            progressDialog = new ProgressDialog()
+            {
+                Owner = this,
+                Title = $"File: {ofd.FileName}",
+                Message = "Reading MARC records...",
+            };
+
+            thread = new Thread(ReadFile);
+            thread.IsBackground = true;
+            thread.Start(args);
+
+            bool? dialogStatus = progressDialog.ShowDialog();
+            if (dialogStatus != true)
+            {
+                cancelTokenSource.Cancel();
+            }
+        }
+
+        private void ReadFile(object? o)
+        {
+            if (o is not FileReaderArgs arg)
+            {
+                return;
+            }
+
+            CancellationToken token = arg.CancellationToken;
+            string filename = arg.Filename;
+            double progress = 0.0;
             List<Record> list = new List<Record>();
 
-            Dispatcher.Invoke(new Action<double>(ProgressBar_Update), DispatcherPriority.Normal, 0.0);
-
+            Dispatcher.Invoke(new Action<double>(progressDialog.ProgressBar_Update), DispatcherPriority.Normal, progress);
             using (FileStream fileStream = new FileStream(filename, FileMode.Open, FileAccess.Read))
             {
                 using (BinaryReader reader = new BinaryReader(fileStream))
                 {
                     FileReader fileReader = new FileReader();
                     Stream stream = reader.BaseStream;
-                    double progress = 0.0;
 
                     while ((!token.IsCancellationRequested) && (reader.PeekChar() >= 0))
                     {
@@ -97,37 +118,31 @@ namespace DemoApp
                         list.Add(record);
 
                         progress = (double)stream.Position / (double)stream.Length;
-                        Dispatcher.Invoke(new Action<double>(ProgressBar_Update), DispatcherPriority.Normal, progress);
+                        Dispatcher.Invoke(new Action<double>(progressDialog.ProgressBar_Update), DispatcherPriority.Normal, progress);
                     }
                 }
             }
-            Dispatcher.Invoke(new Action<double>(ProgressBar_Update), DispatcherPriority.Normal, 1.0);
+            Dispatcher.Invoke(new Action<double>(progressDialog.ProgressBar_Update), DispatcherPriority.Normal, 1.0);
 
             Dispatcher.Invoke(new Action<IEnumerable<Record>>(RecordUpdate), list);
-        }
-
-        private void ProgressBar_Update(double progress)
-        {
-            ProgressBar.Value = progress;
         }
 
         /* Update ListBox with new Records read in from file. */
         private void RecordUpdate(IEnumerable<Record> list)
         {
             records = list.ToList<Record>();
+            progressDialog.Close();
             thread = null;
-            AbortButton.IsEnabled = false;
-            cancelTokenSource.Dispose();
-            cancelTokenSource = null;
 
-            ProgressBar.Value = 0;
-            RecordSelector.Items.Clear();
             foreach (Record r in records)
             {
                 // show the title of each record in the RecordSelector
-                string title = "";
-                DataField? df = (DataField)r.Fields.FirstOrDefault(f => f.Tag == "245");
-                if (df != null)
+                DataField? df = r.Fields.FirstOrDefault(f => f.Tag.Equals("245")) as DataField;
+                if (df == null)
+                {
+                    RecordSelector.Items.Add("");
+                }
+                else
                 {
                     StringBuilder sb = new StringBuilder();
                     char[] titleCodes = { 'a', 'b', 'c' };
@@ -138,9 +153,8 @@ namespace DemoApp
                             sb.Append(sub.Data);
                         }
                     }
-                    title = sb.ToString();
+                    RecordSelector.Items.Add(sb.ToString());
                 }
-                RecordSelector.Items.Add(title);
             }
 
             // select the first record
@@ -153,13 +167,25 @@ namespace DemoApp
             if (index >= 0 && index < RecordSelector.Items.Count)
             {
                 Record record = records[index];
-                ViewRecord(record);
+                DisplayRecord(record);
             }
             else
             {
                 RecordGrid.DataContext = null;
             }
             LabelRecordSelection.Content = $"Record: {index + 1} / {RecordSelector.Items.Count}";
+        }
+
+        private void DisplayRecord(Record record)
+        {
+            if (record == null)
+            {
+                RecordGrid.ItemsSource = null;
+            }
+            else
+            {
+                RecordGrid.ItemsSource = RecordToRows(record);
+            }
         }
 
         private IEnumerable<RecordFieldDataRow> RecordToRows(Record record)
@@ -193,6 +219,7 @@ namespace DemoApp
                     row.Ind1 = dataField.Indicator1;
                     row.Ind2 = dataField.Indicator2;
                     StringBuilder output = new StringBuilder();
+                    
                     foreach (Subfield s in dataField.Subfields)
                     {
                         output.AppendFormat("${0}{1}", s.Code, s.Data);
@@ -204,16 +231,6 @@ namespace DemoApp
             }
 
             return rows;
-        }
-
-        private void ViewRecord(Record record)
-        {
-            if (record == null)
-            {
-                RecordGrid.ItemsSource = null;
-            }
-
-            RecordGrid.ItemsSource = RecordToRows(record);
         }
     }
 }
